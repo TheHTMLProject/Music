@@ -28,13 +28,21 @@
   <div class="body-ambient" id="bodyAmbient"></div>
 
   <nav class="top-nav" aria-label="Music navigation">
-    <button class="top-nav-btn active" data-tab="player" type="button">
+    <button class="top-nav-btn active" data-tab="home" type="button">
+      <span class="material-symbols-outlined">home</span>
+      <span class="top-nav-label">Home</span>
+    </button>
+    <button class="top-nav-btn" data-tab="player" type="button">
       <span class="material-symbols-outlined">play_circle</span>
       <span class="top-nav-label">Player</span>
     </button>
     <button class="top-nav-btn" data-tab="search" type="button">
       <span class="material-symbols-outlined">search</span>
       <span class="top-nav-label">Search</span>
+    </button>
+    <button class="top-nav-btn" data-tab="playlists" type="button">
+      <span class="material-symbols-outlined">queue_music</span>
+      <span class="top-nav-label">Playlists</span>
     </button>
     <button class="top-nav-btn" data-tab="lyrics" type="button">
       <span class="material-symbols-outlined">lyrics</span>
@@ -44,55 +52,89 @@
       <span class="material-symbols-outlined">favorite</span>
       <span class="top-nav-label">Favorites</span>
     </button>
+    <button class="top-nav-btn" data-tab="queue" type="button">
+      <span class="material-symbols-outlined">list</span>
+      <span class="top-nav-label">Queue</span>
+    </button>
   </nav>
 
   <main class="container">
 
-    <section class="tab-content active player-layout" id="playerTab" aria-label="Player">
-      <div class="album-art" id="albumArtContainer">
-        <span class="material-symbols-outlined album-icon">music_note</span>
+    <section class="tab-content active home-layout" id="homeTab" aria-label="Home">
+      <div class="panel-group">
+        <div class="panel" id="homeContinue">
+          <header class="panel-header">Continue Listening</header>
+          <div class="results-list mini scrollable" id="homeContinueList"></div>
+        </div>
+        <div class="panel" id="homeMixes">
+          <header class="panel-header">Made For You</header>
+          <div class="mix-grid" id="homeMixGrid"></div>
+        </div>
+        <div class="panel" id="homeRadios">
+          <header class="panel-header">Quick Radios</header>
+          <div class="radio-grid" id="homeRadioGrid"></div>
+        </div>
       </div>
+    </section>
 
-      <div class="song-info">
-        <h2 id="songTitle">No Song Selected</h2>
-        <p id="artistName">Search for a song to play</p>
-        <div id="statusText"></div>
-      </div>
-
-      <audio id="audioPlayer" crossorigin="anonymous"></audio>
-
-      <div class="controls" aria-label="Playback controls">
-        <button class="control-btn" id="favBtn" type="button" aria-label="Favorite">
-          <span class="material-symbols-outlined" id="favIcon">favorite_border</span>
-        </button>
-        <button class="control-btn" id="prevBtn" type="button" aria-label="Previous">
-          <span class="material-symbols-outlined">skip_previous</span>
-        </button>
-        <button class="control-btn play-pause" id="playBtn" type="button" aria-label="Play">
-          <span class="material-symbols-outlined" id="playIcon">play_arrow</span>
-        </button>
-        <button class="control-btn" id="nextBtn" type="button" aria-label="Next">
-          <span class="material-symbols-outlined">skip_next</span>
-        </button>
-      </div>
-
-      <div class="player-bottom">
-        <div class="progress-bar" id="progressBar" aria-label="Progress">
-          <div class="progress" id="progress"></div>
-          <div class="progress-thumb" id="progressThumb" aria-hidden="true"></div>
+    <section class="tab-content player-layout" id="playerTab" aria-label="Player">
+      <div class="player-main">
+        <div class="album-art" id="albumArtContainer">
+          <span class="material-symbols-outlined album-icon">music_note</span>
         </div>
 
-        <div class="time-info">
-          <span id="currentTime">0:00</span>
-          <span id="duration">0:00</span>
+        <div class="song-info">
+          <h2 id="songTitle">No Song Selected</h2>
+          <p id="artistName">Search for a song to play</p>
+          <div id="statusText"></div>
         </div>
 
-        <div class="volume-control" aria-label="Volume">
-          <button class="volume-btn" id="muteBtn" type="button" aria-label="Mute">
-            <span class="material-symbols-outlined" id="muteIcon">volume_up</span>
+        <div class="controls" aria-label="Playback controls">
+          <button class="control-btn" id="favBtn" type="button" aria-label="Favorite">
+            <span class="material-symbols-outlined" id="favIcon">favorite_border</span>
           </button>
-          <input type="range" min="0" max="100" value="70" id="volumeSlider" aria-label="Volume slider">
+          <button class="control-btn" id="prevBtn" type="button" aria-label="Previous">
+            <span class="material-symbols-outlined">skip_previous</span>
+          </button>
+          <button class="control-btn play-pause" id="playBtn" type="button" aria-label="Play">
+            <span class="material-symbols-outlined" id="playIcon">play_arrow</span>
+          </button>
+          <button class="control-btn" id="nextBtn" type="button" aria-label="Next">
+            <span class="material-symbols-outlined">skip_next</span>
+          </button>
+          <button class="control-btn" id="shuffleBtn" type="button" aria-label="Shuffle">
+            <span class="material-symbols-outlined" id="shuffleIcon">shuffle</span>
+          </button>
+          <button class="control-btn" id="repeatBtn" type="button" aria-label="Repeat">
+            <span class="material-symbols-outlined" id="repeatIcon">repeat</span>
+          </button>
         </div>
+
+        <div class="player-bottom">
+          <div class="progress-bar" id="progressBar" aria-label="Progress">
+            <div class="progress" id="progress"></div>
+            <div class="progress-thumb" id="progressThumb" aria-hidden="true"></div>
+          </div>
+
+          <div class="time-info">
+            <span id="currentTime">0:00</span>
+            <span id="duration">0:00</span>
+          </div>
+
+          <div class="volume-control" aria-label="Volume">
+            <button class="volume-btn" id="muteBtn" type="button" aria-label="Mute">
+              <span class="material-symbols-outlined" id="muteIcon">volume_up</span>
+            </button>
+            <input type="range" min="0" max="100" value="70" id="volumeSlider" aria-label="Volume slider">
+          </div>
+
+          <div class="mini-lyrics" id="miniLyrics">Lyrics will appear here when available</div>
+        </div>
+      </div>
+
+      <div class="side-panel">
+        <header class="panel-header">Up Next</header>
+        <div class="results-list scrollable" id="upNextList"></div>
       </div>
     </section>
 
@@ -114,15 +156,53 @@
       </div>
     </section>
 
+    <section class="tab-content" id="playlistsTab" aria-label="Playlists">
+      <div class="playlist-header">
+        <div class="playlist-create">
+          <input type="text" id="newPlaylistName" placeholder="New playlist name">
+          <button type="button" id="createPlaylistBtn">Create</button>
+        </div>
+        <div class="playlist-actions">
+          <button type="button" id="addCurrentToPlaylistBtn">Add current song</button>
+        </div>
+      </div>
+      <div class="split">
+        <div class="panel">
+          <header class="panel-header">Your Playlists</header>
+          <div class="results-list scrollable" id="playlistsList"></div>
+        </div>
+        <div class="panel">
+          <header class="panel-header" id="playlistDetailTitle">Playlist</header>
+          <div class="results-list scrollable" id="playlistDetailTracks"></div>
+        </div>
+      </div>
+    </section>
+
     <section class="tab-content" id="lyricsTab" aria-label="Lyrics">
-      <div class="lyrics-container" id="lyricsContainer">No lyrics available for this track</div>
+      <div class="lyrics-container has-lyrics" id="lyricsContainer">
+        <div class="karaoke-lines" id="karaokeLines"></div>
+      </div>
+      <div class="lyrics-controls">
+        <label><input type="checkbox" id="toggleSyncedLyrics" checked> Show synced lyrics</label>
+      </div>
     </section>
 
     <section class="tab-content" id="favoritesTab" aria-label="Favorites">
       <div class="favorites-container scrollable" id="favoritesResults">No favorites yet</div>
     </section>
 
+    <section class="tab-content" id="queueTab" aria-label="Queue">
+      <div class="queue-actions">
+        <button type="button" id="clearQueueBtn">Clear queue</button>
+        <button type="button" id="playNextFromFavsBtn">Queue favorites</button>
+      </div>
+      <div class="results-list scrollable" id="queueList"></div>
+    </section>
+
   </main>
+
+  <audio id="audioPrimary" crossorigin="anonymous"></audio>
+  <audio id="audioSecondary" crossorigin="anonymous"></audio>
 
   <script src="/assets/script.js" defer></script>
 </body>

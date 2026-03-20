@@ -185,7 +185,7 @@ body {
 
 .container {
   width: 100%;
-  max-width: 560px;
+  max-width: 980px;
   margin-top: 56px;
   padding: 24px;
   background: var(--card-bg);
@@ -215,8 +215,36 @@ body {
   min-height: 0;
 }
 
+.home-layout {
+  gap: 16px;
+}
+
+.panel-group {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+  width: 100%;
+}
+
+.panel {
+  background: var(--soft-bg);
+  border: 1px solid var(--soft-border);
+  border-radius: 14px;
+  padding: 12px;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.panel-header {
+  font-weight: 650;
+  color: var(--text);
+}
+
 .player-layout {
-  gap: 0;
+  gap: 12px;
+  flex-direction: row;
 }
 
 .album-art {
@@ -677,6 +705,188 @@ html[data-theme="auto"][data-os-theme="light"] .progress-thumb {
   padding-right: 6px;
 }
 
+.lyrics-controls {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.player-main {
+  flex: 2;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.side-panel {
+  flex: 1;
+  min-width: 0;
+  background: var(--soft-bg);
+  border: 1px solid var(--soft-border);
+  border-radius: 14px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mini-lyrics {
+  margin-top: 6px;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(0,0,0,.05);
+  color: var(--muted);
+  font-size: 13px;
+  min-height: 38px;
+}
+
+.results-list.mini .list-item {
+  padding: 8px;
+}
+
+.mix-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.mix-card {
+  position: relative;
+  border-radius: 14px;
+  padding: 14px;
+  color: #fff;
+  min-height: 120px;
+  overflow: hidden;
+  box-shadow: 0 10px 24px rgba(0,0,0,.2);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mix-title {
+  font-weight: 700;
+  font-size: 16px;
+}
+
+.mix-sub {
+  opacity: .8;
+  font-size: 13px;
+}
+
+.mix-play {
+  margin-top: auto;
+  align-self: flex-start;
+  border: none;
+  background: rgba(255,255,255,.2);
+  color: #fff;
+  padding: 8px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.radio-grid {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.radio-pill {
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: var(--brand);
+  color: var(--brand-contrast);
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.karaoke-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  height: 100%;
+}
+
+.karaoke-line {
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(0,0,0,.05);
+}
+
+.karaoke-line.active {
+  background: var(--brand);
+  color: var(--brand-contrast);
+}
+
+.split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  min-height: 0;
+}
+
+.playlist-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.playlist-create {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.playlist-create input {
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--soft-border);
+  background: var(--soft-bg);
+  color: var(--text);
+}
+
+.playlist-create button,
+.playlist-actions button,
+.queue-actions button {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: none;
+  background: var(--brand);
+  color: var(--brand-contrast);
+  cursor: pointer;
+}
+
+.playlist-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.mix-cover {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  color: #fff;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.queue-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.list-item.is-current {
+  border-color: rgba(60,171,100,.65);
+}
+
 @media (max-width: 520px) {
   .container {
     padding: 20px;
@@ -692,5 +902,13 @@ html[data-theme="auto"][data-os-theme="light"] .progress-thumb {
 
   .album-icon {
     font-size: 64px;
+  }
+
+  .player-layout {
+    flex-direction: column;
+  }
+
+  .split {
+    grid-template-columns: 1fr;
   }
 }

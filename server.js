@@ -2,10 +2,9 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
-import fetch from "node-fetch";
-import ytSearch from "yt-search";
 import fs from "node:fs";
-import YTDlpWrap from "yt-dlp-wrap";
+import { Readable } from "node:stream";
+import { Blob } from "node:buffer";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -15,6 +14,25 @@ const binaryName = process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
 const binaryPath = join(__dirname, binaryName);
 
 const fastify = Fastify();
+
+const LRCLIB_ENDPOINT = "https://lrclib.net/api/search";
+
+if (typeof global.File === "undefined") {
+  global.File = class File extends Blob {
+    constructor(parts, name, options = {}) {
+      super(parts, options);
+      this.name = String(name || "");
+      this.lastModified = options.lastModified ?? Date.now();
+    }
+    get [Symbol.toStringTag]() {
+      return "File";
+    }
+  };
+}
+
+const { default: fetch } = await import("node-fetch");
+const { default: ytSearch } = await import("yt-search");
+const { default: YTDlpWrap } = await import("yt-dlp-wrap");
 
 let ytDlpWrap;
 (async () => {
@@ -85,6 +103,43 @@ fastify.get("/music/search", async (req, reply) => {
   }
 });
 
+fastify.get("/music/lyrics", async (req, reply) => {
+  const { artist = "", title = "" } = req.query || {};
+  if (!artist && !title) return reply.status(400).send({ error: "Missing artist or title" });
+  try {
+    const lyr = await fetchLyricsFromLrcLib(artist, title);
+    if (!lyr) return reply.status(404).send({ error: "No lyrics" });
+    return reply.send(lyr);
+  } catch (e) {
+    console.error("[Lyrics]", e.message || e);
+    return reply.status(500).send({ error: "Lyrics failed" });
+  }
+});
+
+fastify.get("/music/radio", async (req, reply) => {
+  const { q } = req.query || {};
+  if (!q) return reply.status(400).send({ error: "Missing query" });
+  try {
+    const res = await ytSearch(q);
+    const videos = Array.isArray(res?.videos) ? res.videos.slice(0, 15) : [];
+    const mapped = videos.map((v) => ({
+      trackName: v.title,
+      artistName: v.author?.name || "",
+      artworkUrl100: v.thumbnail,
+      artworkUrl60: v.thumbnail,
+      trackId: v.videoId,
+      videoId: v.videoId,
+      collectionName: "Radio",
+      source: "youtube",
+      trackTimeMillis: v.seconds * 1000,
+    }));
+    return reply.send({ resultCount: mapped.length, results: mapped });
+  } catch (e) {
+    console.error("[Radio]", e.message || e);
+    return reply.status(500).send({ error: "Radio failed" });
+  }
+});
+
 const directUrlCache = new Map();
 const DIRECT_URL_TTL_MS = 5 * 60 * 1000;
 
@@ -133,6 +188,25 @@ async function resolveDirectAudioUrl(id) {
   return url;
 }
 
+async function fetchLyricsFromLrcLib(artist, title) {
+  if (!artist && !title) return null;
+  const params = new URLSearchParams();
+  if (title) params.set("track_name", title);
+  if (artist) params.set("artist_name", artist);
+  params.set("limit", "1");
+  const url = `${LRCLIB_ENDPOINT}?${params.toString()}`;
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`lyrics-${resp.status}`);
+  const json = await resp.json();
+  if (!Array.isArray(json) || json.length === 0) return null;
+  const best = json[0];
+  return {
+    syncedLyrics: best.syncedLyrics || null,
+    plainLyrics: best.plainLyrics || null,
+    source: "lrclib",
+  };
+}
+
 fastify.get("/music/stream", async (req, reply) => {
   const { id } = req.query;
 
@@ -169,6 +243,33 @@ fastify.get("/music/stream", async (req, reply) => {
   }
 });
 
+fastify.get("/music/direct-audio", async (req, reply) => {
+  const { id } = req.query;
+  if (!id) return reply.status(400).send({ error: "Missing id" });
+  try {
+    const url = await resolveDirectAudioUrl(id);
+    const headers = {};
+    if (req.headers.range) headers.Range = req.headers.range;
+    const resp = await fetch(url, { headers });
+
+    reply.status(resp.status);
+    resp.headers.forEach((val, key) => {
+      if (["connection", "transfer-encoding"].includes(key.toLowerCase())) return;
+      reply.header(key, val);
+    });
+    reply.header("Cache-Control", "no-store");
+
+    let body = resp.body || null;
+    if (body && typeof body.getReader === "function") {
+      body = Readable.fromWeb(body);
+    }
+    return reply.send(body);
+  } catch (e) {
+    console.error("[DirectAudio]", e.message || e);
+    return reply.status(500).send({ error: "Direct audio failed" });
+  }
+});
+
 fastify.get("/music/cover", async (req, reply) => {
   const { url } = req.query;
   if (!url) return reply.status(400).send("Missing url");
@@ -176,7 +277,7 @@ fastify.get("/music/cover", async (req, reply) => {
     const resp = await fetch(url);
     const buffer = await resp.arrayBuffer();
     reply.header("Content-Type", resp.headers.get("content-type"));
-    reply.header("Cache-Control", "public, max-age=86400");
+    reply.header("Cache-Control", "public, max-age=604800, stale-while-revalidate=86400");
     return reply.send(Buffer.from(buffer));
   } catch (e) {
     return reply.status(500).send("Error");
