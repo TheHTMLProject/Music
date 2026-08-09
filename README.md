@@ -1,25 +1,113 @@
 # The HTML Project Music
 
-* Serves a single-page music web app (static frontend from `public/`) using a Fastify server on port `3333`.
-* Lets you search for songs; the backend combines iTunes song metadata results with YouTube search results into one list.
-* Plays audio by finding a YouTube video ID (when needed) and streaming the best available audio format.
-* Supports real scrubbing/seek in the player by providing Range-capable audio streaming (so dragging the progress bar jumps to that time).
-* Fetches and caches album art through a backend `/music/cover` proxy endpoint.
-* Provides a tabbed UI: Player, Search, Lyrics, Favorites.
-* Pulls lyrics from a public lyrics API and displays them when available.
-* Maintains a playback queue based on the current list (search results or favorites) and auto-plays the next track when one ends.
-* Stores favorites locally in the browser (localStorage) and lets you play or remove them from the Favorites tab.
-* Includes volume control and mute/unmute, plus previous/next track controls.
+The HTML Project Music is a self-hosted music player powered by YouTube, Invidious, and optional Gemini features.
 
-## How to install
+## Docker installation
 
-Step 1 - Clone Repo and cd into the directory
-`git clone https://github.com/TheHTMLProject/music.git && cd music`
+Docker is the simplest way to run the app.
 
-Step 2 - Begin npm install
-`npm install`
+1. Clone the repository.
 
-Step 3 - Run script to test. The default port is 3333, you can change this in server.js
-`npm run start`
+```bash
+git clone https://github.com/TheHTMLProject/Music.git
+cd Music
+```
 
-All done! These were super quick instructions, more coming soon!
+2. Build the image.
+
+```bash
+docker build -t thp-music .
+```
+
+3. Start the container. Each `--env` flag sets one app option directly from the command. Change the values as needed.
+
+```bash
+docker run -d \
+  --name thp-music \
+  --restart unless-stopped \
+  --publish 8080:8080 \
+  --env PORT=8080 \
+  --env GEMINI_API_KEY="your-api-key" \
+  --env GEMINI_MODEL="gemini-3.5-flash-lite" \
+  --env INVIDIOUS_URL="https://your-invidious-instance.example" \
+  thp-music
+```
+
+Open `http://localhost:8080`.
+
+The same command on one line is:
+
+```bash
+docker run -d --name thp-music --restart unless-stopped --publish 8080:8080 --env PORT=8080 --env GEMINI_API_KEY="your-api-key" --env GEMINI_MODEL="gemini-3.5-flash-lite" --env INVIDIOUS_URL="https://your-invidious-instance.example" thp-music
+```
+
+Use `--env NAME="value"` for each setting you want to customize. Every `--env` flag is optional. `PORT` defaults to `3333`. Gemini features are disabled when `GEMINI_API_KEY` is empty. The app uses YouTube directly when `INVIDIOUS_URL` is empty.
+
+If you change `PORT`, both numbers in `--publish HOST_PORT:CONTAINER_PORT` do not need to match. The container port must match `PORT`. For example, `--publish 9000:8080 --env PORT=8080` opens the app at `http://localhost:9000`.
+
+You can also keep settings in a local `.env` file.
+
+```bash
+cp .env.example .env
+docker run -d --name thp-music --restart unless-stopped --env-file .env -p 3333:3333 thp-music
+```
+
+Useful container commands:
+
+```bash
+docker logs -f thp-music
+docker stop thp-music
+docker rm thp-music
+```
+
+## Regular installation
+
+Requirements:
+
+- Node.js 22 or newer
+- npm
+- FFmpeg
+- Python 3
+
+1. Clone the repository and install dependencies.
+
+```bash
+git clone https://github.com/TheHTMLProject/Music.git
+cd Music
+npm ci
+```
+
+2. Create `.env` from `.env.example` and edit the values you want.
+
+```bash
+cp .env.example .env
+```
+
+PowerShell users can run:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+3. Start the app.
+
+```bash
+npm start
+```
+
+Open `http://localhost:3333`, or use the port set in `.env`.
+
+## Environment settings
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `PORT` | `3333` | Port used by the web server |
+| `GEMINI_API_KEY` | Empty | Enables AI mixes, radio assistance, and lyric translation |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Gemini model used by AI features |
+| `INVIDIOUS_URL` | Empty | Optional Invidious instance used as a playback fallback |
+
+Do not commit your `.env` file or API keys.
+
+## License
+
+See [LICENSE](LICENSE).

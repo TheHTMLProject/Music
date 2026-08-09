@@ -1737,7 +1737,10 @@ fastify.setNotFoundHandler((req, reply) => {
   reply.sendFile("index.html");
 });
 
-const port = 3333;
+const requestedPort = Number.parseInt(process.env.PORT || "3333", 10);
+const port = Number.isInteger(requestedPort) && requestedPort > 0 && requestedPort <= 65535
+  ? requestedPort
+  : 3333;
 fastify
   .listen({ port, host: "0.0.0.0" })
   .then(() => {
