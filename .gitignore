@@ -1,3 +1,7 @@
 agents
 node_modules
 .claude
+.codex
+.env
+.env.*
+!.env.example
