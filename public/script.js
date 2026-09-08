@@ -160,7 +160,7 @@ window.addEventListener('DOMContentLoaded', () => {
       volume: 1,
       shuffle: false,
       repeat: 'off',
-      crossfade: true,
+      crossfade: false,
       gapless: true,
       railExpanded: false,
       syncedLyrics: true,
@@ -182,7 +182,13 @@ window.addEventListener('DOMContentLoaded', () => {
   let isScrubbing = false
   let wasPlayingBeforeScrub = false
   let lastVolume = library.settings.volume ?? 1
-  let crossfadeArmed = false
+  let playbackToken = 0
+  let preloadToken = 0
+  let queueVersion = 0
+  let topUpTask = null
+  let pendingAutoplay = false
+  let translationEnabled = false
+  let lastSessionSave = 0
   let selectedPlaylistId = null
   let plannedNext = null
   let prewarmedId = null
@@ -213,7 +219,6 @@ window.addEventListener('DOMContentLoaded', () => {
   const CANDIDATE_TTL_MS = 10 * 60 * 1000
 
   let candidatePool = { key: '', tracks: [], at: 0 }
-  let topUpBusy = false
   let queueContext = { source: 'manual', finiteEnd: -1, phase: 'algorithm', algorithmContext: [], algorithmPool: [], aiPool: [] }
   let sessionTrackKeys = new Set()
   let sessionSongs = []
@@ -309,13 +314,16 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
   function loadLibrary() {
-    const raw = localStorage.getItem('music-library-v1')
-    if (!raw) return deepClone(defaultLibrary)
     try {
+      const raw = localStorage.getItem('music-library-v1')
+      if (!raw) return deepClone(defaultLibrary)
       const parsed = JSON.parse(raw)
       return {
         ...deepClone(defaultLibrary),
         ...parsed,
+        favorites: Array.isArray(parsed.favorites) ? parsed.favorites : [],
+        playlists: Array.isArray(parsed.playlists) ? parsed.playlists.filter(p => p && Array.isArray(p.tracks)) : [],
+        history: Array.isArray(parsed.history) ? parsed.history : [],
         settings: { ...deepClone(defaultLibrary.settings), ...(parsed.settings || {}) }
       }
     } catch {
@@ -464,8 +472,17 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
   const videoIdCache = new Map()
+  const videoIdRequests = new Map()
 
   async function getVideoIdForSong(song) {
+    const key = String(song?.trackId || songIdentity(song))
+    if (videoIdRequests.has(key)) return videoIdRequests.get(key)
+    const task = resolveVideoIdForSong(song).finally(() => videoIdRequests.delete(key))
+    videoIdRequests.set(key, task)
+    return task
+  }
+
+  async function resolveVideoIdForSong(song) {
     if (!song) throw new Error('no-song')
     if (song.videoId) return song.videoId
     const cached = videoIdCache.get(song.trackId)
@@ -476,7 +493,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (song.artistName) params.set('artist', song.artistName)
     const ms = Number(song.trackTimeMillis)
     if (Number.isFinite(ms) && ms > 0) params.set('duration', String(Math.round(ms / 1000)))
-    const res = await fetch(`/music/search?${params.toString()}`)
+    const res = await fetch(`/music/search?${params.toString()}`, { signal: AbortSignal.timeout(15000) })
     if (!res.ok) throw new Error('search-failed')
     const data = await res.json()
     if (data?.videoId) {
@@ -491,93 +508,47 @@ window.addEventListener('DOMContentLoaded', () => {
     return `/music/direct-audio?id=${encodeURIComponent(videoId)}`
   }
 
-  async function prepareAudio(el, song, autoplay = false) {
-    const vid = await getVideoIdForSong(song)
+  function resetAudio(el) {
+    el.pause()
     resetWaveformAudio(el)
-    el.dataset.trackId = String(song.trackId || '')
-    el.src = buildAudioSrc(vid)
+    el.removeAttribute('src')
+    el.dataset.trackId = ''
     el.load()
-    if (autoplay) await el.play()
-    return vid
-  }
-
-  function swapPlayers() {
-    const tmp = activeAudio
-    activeAudio = preloadAudio
-    preloadAudio = tmp
-    applyAudioVolumeState()
-    ensureWaveformAudio(activeAudio)
   }
 
   function preloadNextTrack() {
-    if (!library.settings.gapless) return
+    if (!library.settings.gapless || library.settings.repeat === 'one') return
     const next = getNextTrack()
     if (!next) {
-      resetWaveformAudio(preloadAudio)
-      preloadAudio.removeAttribute('src')
-      preloadAudio.dataset.trackId = ''
-      prewarmedId = null
+      ++preloadToken
+      resetAudio(preloadAudio)
       return
     }
-    if (preloadAudio.dataset.trackId === String(next.trackId || '') && preloadAudio.readyState >= 2) return
-
-    getVideoIdForSong(next)
-      .then((vid) => {
-        if (prewarmedId !== vid) {
-          prewarmedId = vid
-          fetch(`/music/prewarm?id=${encodeURIComponent(vid)}`).catch(() => {})
-        }
-        preloadAudio.preload = 'auto'
-        resetWaveformAudio(preloadAudio)
-        preloadAudio.dataset.trackId = String(next.trackId || '')
-        preloadAudio.src = buildAudioSrc(vid)
-        preloadAudio.load()
-      })
-      .catch(() => {})
+    const key = String(next.trackId)
+    if (preloadAudio.dataset.trackId === key) return
+    const token = ++preloadToken
+    const target = preloadAudio
+    resetAudio(target)
+    target.dataset.trackId = key
+    getVideoIdForSong(next).then(vid => {
+      if (token !== preloadToken || target !== preloadAudio || getNextTrack() !== next) return
+      target.preload = 'auto'
+      target.src = buildAudioSrc(vid)
+      target.load()
+    }).catch(() => {
+      if (token === preloadToken) target.dataset.trackId = ''
+    })
   }
 
   function ensureNextReady() {
-    if (!library.settings.gapless) return
-    const dur = activeAudio.duration
-    if (!Number.isFinite(dur) || dur <= 0) return
-    const remaining = dur - activeAudio.currentTime
-    if (remaining > PRESTREAM_LEAD_SECONDS || remaining <= 0) return
-
-    const next = getNextTrack()
-    if (!next) return
-    const matches = preloadAudio.dataset.trackId === String(next.trackId || '')
-    if (!matches || preloadAudio.readyState < 3) preloadNextTrack()
-  }
-
-  function handleCrossfade() {
-    if (!library.settings.crossfade || !preloadAudio.src || !currentSong) return
-    const next = getNextTrack()
-    if (!next || preloadAudio.dataset.trackId !== String(next.trackId || '') || preloadAudio.readyState < 2) return
-    if (crossfadeArmed) return
-    const remaining = activeAudio.duration - activeAudio.currentTime
-    if (remaining <= 1.2 && remaining > 0) {
-      crossfadeArmed = true
-      preloadAudio.currentTime = 0
-      preloadAudio.volume = activeAudio.volume
-      preloadAudio.muted = activeAudio.muted
-      preloadAudio.play().catch(() => {})
-      const startVol = activeAudio.volume
-      const start = performance.now()
-      const step = (now) => {
-        const t = Math.min(1, (now - start) / 1000)
-        activeAudio.volume = startVol * (1 - t)
-        preloadAudio.volume = startVol * t
-        if (t < 1) requestAnimationFrame(step)
-      }
-      requestAnimationFrame(step)
-    }
+    preloadNextTrack()
   }
 
   function computeNextIndex() {
     if (!queue.length) return -1
     if (library.settings.shuffle) {
       const indices = queue.map((_, i) => i).filter(i => i !== queueIndex)
-      if (!indices.length) return queueIndex
+      if (!indices.length) return library.settings.repeat === 'all' ? queueIndex : -1
       return indices[Math.floor(Math.random() * indices.length)]
     }
     const nextIndex = queueIndex + 1
@@ -886,10 +857,15 @@ window.addEventListener('DOMContentLoaded', () => {
   function syncProgressUI() {
     const dur = activeAudio.duration
     const cur = activeAudio.currentTime
+    if (isScrubbing) return
     durationEl.textContent = fmtTime(dur)
     currentTimeEl.textContent = fmtTime(cur)
     if (Number.isFinite(dur) && dur > 0) setProgressPct((cur / dur) * 100)
     else setProgressPct(0)
+    progressBar.setAttribute('aria-valuetext', `${fmtTime(cur)} of ${fmtTime(dur)}`)
+    if (navigator.mediaSession?.setPositionState && Number.isFinite(dur) && dur > 0) {
+      try { navigator.mediaSession.setPositionState({ duration: dur, playbackRate: activeAudio.playbackRate, position: Math.min(dur, Math.max(0, cur)) }) } catch {}
+    }
   }
 
   let pendingSeekTime = null
@@ -909,8 +885,8 @@ window.addEventListener('DOMContentLoaded', () => {
   function commitSeek(time) {
     if (!Number.isFinite(time) || !Number.isFinite(activeAudio.duration)) return
     const target = Math.min(Math.max(0, time), activeAudio.duration)
-    if (typeof activeAudio.fastSeek === 'function') activeAudio.fastSeek(target)
-    else activeAudio.currentTime = target
+    activeAudio.currentTime = target
+    resetLyricTracking()
     currentTimeEl.textContent = fmtTime(target)
     setProgressPct((target / activeAudio.duration) * 100)
   }
@@ -1545,9 +1521,9 @@ window.addEventListener('DOMContentLoaded', () => {
       setTranslateLabel('Translate', false)
       return
     }
-    if (!aiEnabled) {
+    if (!translationEnabled) {
       setTranslateLabel('Translate', false)
-      showToast('AI is not configured')
+      showToast('Translation is not configured')
       return
     }
     if (!lyricState.synced.length) {
@@ -1566,7 +1542,7 @@ window.addEventListener('DOMContentLoaded', () => {
     setTranslateLabel('Translating', true)
 
     try {
-      const res = await fetch('/music/ai/translate', {
+      const res = await fetch('/music/translate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1850,7 +1826,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
 
   function renderQueue() {
-    invalidateNextPlan()
+    if (plannedNext && queue[plannedNext.index] !== plannedNext.song) invalidateNextPlan()
     queueList.innerHTML = ''
     queue.forEach((song, idx) => {
       const row = buildListRow(song, {
@@ -1864,6 +1840,8 @@ window.addEventListener('DOMContentLoaded', () => {
       queueList.appendChild(row)
     })
     renderUpNext()
+    preloadNextTrack()
+    savePlaybackSession()
     const upcoming = queue.length - Math.max(0, queueIndex + 1)
     if (upcoming > 0) {
       queueBadge.textContent = String(Math.min(99, upcoming))
@@ -1902,7 +1880,7 @@ window.addEventListener('DOMContentLoaded', () => {
   function removeFromQueue(idx) {
     if (idx < 0 || idx >= queue.length) return
     queue.splice(idx, 1)
-    if (idx < queueIndex) queueIndex--
+    if (idx <= queueIndex) queueIndex--
     else if (queueIndex >= queue.length) queueIndex = queue.length - 1
     renderQueue()
     topUpQueue()
@@ -1941,6 +1919,11 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
   function clearQueue() {
+    ++playbackToken
+    ++preloadToken
+    ++queueVersion
+    pendingAutoplay = false
+    invalidateNextPlan()
     queue = []
     queueIndex = -1
     queueContext = { source: 'manual', finiteEnd: -1, phase: 'algorithm', algorithmContext: [], algorithmPool: [], aiPool: [] }
@@ -1953,6 +1936,12 @@ window.addEventListener('DOMContentLoaded', () => {
     activeAudio.removeAttribute('src')
     preloadAudio.removeAttribute('src')
     currentSong = null
+    activeAudio.load()
+    preloadAudio.load()
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.metadata = null
+      try { navigator.mediaSession.setPositionState() } catch {}
+    }
     setArtwork('')
     songTitle.textContent = 'No song selected'
     artistName.textContent = 'Search for a song to play'
@@ -2030,14 +2019,16 @@ window.addEventListener('DOMContentLoaded', () => {
     const seen = new Set()
     const out = []
     let newIndex = 0
+    const indices = new Map()
     list.forEach((song, idx) => {
       if (!song) return
       const key = coreTrackKey(song) || songIdentity(song)
       if (seen.has(key)) {
-        if (idx === keepIndex) newIndex = out.length - 1
+        if (idx === keepIndex) newIndex = indices.get(key)
         return
       }
       seen.add(key)
+      indices.set(key, out.length)
       if (idx === keepIndex) newIndex = out.length
       out.push(song)
     })
@@ -2054,6 +2045,8 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
   function setQueue(list, startIndex = 0, options = {}) {
+    ++queueVersion
+    invalidateNextPlan()
     const deduped = dedupeQueueList(list, startIndex)
     queue = deduped.list
     if (!queue.length) {
@@ -2816,12 +2809,11 @@ window.addEventListener('DOMContentLoaded', () => {
     if (activeFacet === 'songs') {
       const items = searchFacets.songs
       if (!items.length) {
-        setSearchMessage(lastQuery ? 'No songs found, try enabling community uploads' : 'Search for a song to get started')
+        setSearchMessage(lastQuery ? 'No songs or community uploads found' : 'Search for a song to get started')
         return
       }
-      items.forEach(song => {
-        searchResults.appendChild(buildListRow(song, { playHandler: () => setQueue([song], 0) }))
-      })
+      appendSongResultGroup('Suggested songs', 'Catalog matches and uploads tied to the requested artist', items.filter(song => !song.community))
+      appendSongResultGroup('Community uploads', 'Reposts, covers, remixes, and uploads from other channels', items.filter(song => song.community))
       return
     }
 
@@ -2852,6 +2844,22 @@ window.addEventListener('DOMContentLoaded', () => {
       return
     }
     items.forEach(pl => playlistResults.appendChild(buildCommunityPlaylistRow(pl)))
+  }
+
+  function appendSongResultGroup(title, note, songs) {
+    if (!songs.length) return
+    const section = document.createElement('section')
+    section.className = 'search-result-group'
+    section.setAttribute('aria-label', title)
+    const heading = document.createElement('h2')
+    heading.className = 'search-result-heading'
+    heading.textContent = title
+    const description = document.createElement('p')
+    description.className = 'search-result-note'
+    description.textContent = note
+    section.append(heading, description)
+    songs.forEach(song => section.appendChild(buildListRow(song, { playHandler: () => setQueue([song], 0) })))
+    searchResults.appendChild(section)
   }
 
   function buildArtistCard(artist) {
@@ -3108,8 +3116,7 @@ window.addEventListener('DOMContentLoaded', () => {
     artistResults.innerHTML = ''
     playlistResults.innerHTML = ''
 
-    const params = new URLSearchParams({ q })
-    if (library.settings.includeCommunity) params.set('community', '1')
+    const params = new URLSearchParams({ q, community: '1' })
 
     fetch(`/music/meta?${params.toString()}`)
       .then(r => r.json())
@@ -3159,7 +3166,8 @@ window.addEventListener('DOMContentLoaded', () => {
   })
 
   function syncCommunityToggle() {
-    const on = Boolean(library.settings.includeCommunity)
+    const on = true
+    library.settings.includeCommunity = true
     communityToggle.classList.toggle('is-active', on)
     communityToggle.setAttribute('aria-pressed', String(on))
   }
@@ -3572,82 +3580,25 @@ window.addEventListener('DOMContentLoaded', () => {
     return added
   }
 
-  async function buildAiAutoplayPool() {
-    if (!aiEnabled || !queueContext.algorithmContext.length) return []
-    try {
-      const data = await requestAiQueue({
-        count: QUEUE_LOOKAHEAD,
-        context: queueContext.algorithmContext,
-        exclude: sessionSongs
-      })
-      return dedupeTracks(Array.isArray(data.results) ? data.results : []).filter(song => {
-        const key = coreTrackKey(song) || songIdentity(song)
-        return key && !sessionTrackKeys.has(key)
-      })
-    } catch {
-      return []
-    }
-  }
-
-  async function topUpQueue() {
-    if (!library.settings.endless) return
-    if (topUpBusy) return
-    if (!currentSong && !queue.length) return
-
-    if (queueContext.finiteEnd >= 0) {
-      if (queueIndex < queueContext.finiteEnd) return
-      queueContext.finiteEnd = -1
-      queueContext.phase = 'algorithm'
-      queueContext.algorithmContext = []
-      queueContext.algorithmPool = []
-      queueContext.aiPool = []
-      showToast('Autoplay started')
-    }
-
+  function topUpQueue() {
+    if (!library.settings.endless || (!currentSong && !queue.length)) return Promise.resolve()
+    if (topUpTask?.version === queueVersion) return topUpTask.promise
+    const version = queueVersion
+    const context = queueContext
+    if (context.finiteEnd >= 0 && queueIndex < context.finiteEnd) return Promise.resolve()
     const missing = QUEUE_LOOKAHEAD - (queue.length - Math.max(0, queueIndex + 1))
-    if (missing <= 0) return
-
-    topUpBusy = true
-    try {
-      let added = []
-
-      if (queueContext.phase === 'ai') {
-        if (!queueContext.aiPool.length) queueContext.aiPool = await buildAiAutoplayPool()
-        if (queueContext.aiPool.length) {
-          added = appendFromPool(queueContext.aiPool, missing)
-          if (!queueContext.aiPool.length) queueContext.phase = 'algorithm'
-        } else {
-          queueContext.phase = 'algorithm'
-        }
-      }
-
-      if (!added.length && queueContext.phase === 'algorithm') {
-        if (!queueContext.algorithmPool.length) {
-          let algorithmBatch = await buildTasteContinuation(QUEUE_LOOKAHEAD)
-          if (algorithmBatch.length < QUEUE_LOOKAHEAD) {
-            algorithmBatch = dedupeTracks([
-              ...algorithmBatch,
-              ...await radioFallback(QUEUE_LOOKAHEAD - algorithmBatch.length)
-            ]).filter(song => {
-              const key = coreTrackKey(song) || songIdentity(song)
-              return key && !sessionTrackKeys.has(key)
-            })
-          }
-          queueContext.algorithmContext = algorithmBatch.slice(0, QUEUE_LOOKAHEAD)
-          queueContext.algorithmPool = [...queueContext.algorithmContext]
-          queueContext.aiPool = []
-        }
-
-        added = appendFromPool(queueContext.algorithmPool, missing)
-        if (!queueContext.algorithmPool.length) {
-          queueContext.phase = aiEnabled && queueContext.algorithmContext.length ? 'ai' : 'algorithm'
-        }
-      }
-
-      if (added.length) renderQueue()
-    } finally {
-      topUpBusy = false
-    }
+    if (missing <= 0) return Promise.resolve()
+    const promise = (async () => {
+      let tracks = await buildTasteContinuation(missing)
+      if (version !== queueVersion || !library.settings.endless) return
+      if (tracks.length < missing) tracks = dedupeTracks([...tracks, ...await radioFallback(missing - tracks.length)])
+      if (version !== queueVersion || !library.settings.endless) return
+      if (appendAutoplayTracks(tracks).length) renderQueue()
+    })().catch(() => {}).finally(() => {
+      if (topUpTask?.promise === promise) topUpTask = null
+    })
+    topUpTask = { version, promise }
+    return promise
   }
 
   async function radioFallback(count) {
@@ -3715,7 +3666,7 @@ window.addEventListener('DOMContentLoaded', () => {
       renderMixes()
       return
     }
-    if (aiBusy && !force) return
+    if (aiBusy) return
 
     const cached = readMixCache()
     if (cached && !force) {
@@ -3723,6 +3674,7 @@ window.addEventListener('DOMContentLoaded', () => {
       return
     }
 
+    if (!force) { renderMixes(cached || []); return }
     aiBusy = true
     if (refreshMixesBtn) refreshMixesBtn.disabled = true
     try {
@@ -3798,42 +3750,63 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
 
-  async function playSong(song) {
+  async function playSong(song, options = {}) {
     if (!song) return
-    if (!queue.some(s => s.trackId === song.trackId)) {
+    const token = ++playbackToken
+    ++preloadToken
+    pendingAutoplay = options.autoplay !== false
+    recordPlayOutcome()
+    const existing = queue.findIndex(track => track.trackId === song.trackId)
+    if (existing < 0) {
       queue.push(song)
       registerSessionTracks([song])
       queueIndex = queue.length - 1
-    } else {
-      queueIndex = queue.findIndex(s => s.trackId === song.trackId)
-    }
-
-    setStatus('Loading')
-    crossfadeArmed = false
-    recordPlayOutcome()
+    } else queueIndex = existing
+    const ready = preloadAudio.dataset.trackId === String(song.trackId) && preloadAudio.readyState >= 2
+    if (ready) {
+      resetAudio(activeAudio)
+      const old = activeAudio
+      activeAudio = preloadAudio
+      preloadAudio = old
+    } else resetAudio(activeAudio)
+    const target = activeAudio
     invalidateNextPlan()
-    activeAudio.pause()
-    resetWaveformAudio(activeAudio)
-    activeAudio.removeAttribute('src')
-    activeAudio.load()
     currentSong = song
+    isScrubbing = false
+    pendingSeekTime = null
+    progressBar.classList.remove('is-scrubbing')
+    applyAudioVolumeState()
     applySongUI(song)
-    refillEndlessQueue()
+    syncProgressUI()
+    setStatus('Loading')
     renderQueue()
     syncPlayUI()
-
     try {
-      await prepareAudio(activeAudio, song, true)
+      if (!ready) {
+        const vid = await getVideoIdForSong(song)
+        if (token !== playbackToken) return
+        target.dataset.trackId = String(song.trackId)
+        target.src = buildAudioSrc(vid)
+        target.load()
+      }
+      if (token !== playbackToken) return
+      if (options.position > 0) {
+        const resume = () => {
+          if (token === playbackToken && Number.isFinite(target.duration)) target.currentTime = Math.min(options.position, Math.max(0, target.duration - 0.1))
+        }
+        if (target.readyState >= 1) resume()
+        else target.addEventListener('loadedmetadata', resume, { once: true })
+      }
+      if (pendingAutoplay) await target.play()
+      if (token !== playbackToken) return
       setStatus('')
       syncPlayUI()
-      planNextTrack()
       preloadNextTrack()
-    } catch {
-      setStatus('Unable to play this track')
-      showToast('Unable to play this track', buildInvidiousAction(song))
-      activeAudio.pause()
-      activeAudio.removeAttribute('src')
-      activeAudio.load()
+      if (pendingAutoplay) topUpQueue()
+    } catch (error) {
+      if (token !== playbackToken || error.name === 'AbortError') return
+      setStatus(error.name === 'NotAllowedError' ? 'Tap Play to continue' : 'Unable to play this track')
+      showToast(error.name === 'NotAllowedError' ? 'Tap Play to continue' : 'Unable to play this track', buildInvidiousAction(song))
       syncPlayUI()
     }
   }
@@ -3866,10 +3839,13 @@ window.addEventListener('DOMContentLoaded', () => {
         album: song.collectionName || '',
         artwork: url ? [{ src: url, sizes: '512x512', type: 'image/jpeg' }] : []
       })
-      navigator.mediaSession.setActionHandler('play', () => togglePlay())
-      navigator.mediaSession.setActionHandler('pause', () => togglePlay())
+      navigator.mediaSession.setActionHandler('play', () => { pendingAutoplay = true; if (activeAudio.paused) togglePlay() })
+      navigator.mediaSession.setActionHandler('pause', () => { pendingAutoplay = false; activeAudio.pause() })
       navigator.mediaSession.setActionHandler('previoustrack', () => prevSong())
       navigator.mediaSession.setActionHandler('nexttrack', () => nextSong(true))
+      navigator.mediaSession.setActionHandler('seekto', event => commitSeek(event.seekTime))
+      navigator.mediaSession.setActionHandler('seekbackward', event => commitSeek(activeAudio.currentTime - (event.seekOffset || 10)))
+      navigator.mediaSession.setActionHandler('seekforward', event => commitSeek(activeAudio.currentTime + (event.seekOffset || 10)))
     } catch {}
   }
 
@@ -3889,8 +3865,11 @@ window.addEventListener('DOMContentLoaded', () => {
       if (queue.length) playSong(queue[Math.max(0, queueIndex)])
       return
     }
-    if (activeAudio.paused) activeAudio.play().catch(() => {})
-    else activeAudio.pause()
+    if (activeAudio.paused) {
+      pendingAutoplay = true
+      if (activeAudio.error) { playSong(currentSong); return }
+      activeAudio.play().catch(() => setStatus('Tap Play to retry'))
+    } else { pendingAutoplay = false; activeAudio.pause() }
     syncPlayUI()
   }
 
@@ -3917,7 +3896,9 @@ window.addEventListener('DOMContentLoaded', () => {
     const nextIdx = getNextIndex()
     if (nextIdx === -1) {
       if (library.settings.endless) {
+        const token = playbackToken
         topUpQueue().then(() => {
+          if (token !== playbackToken || !pendingAutoplay) return
           invalidateNextPlan()
           const retry = getNextIndex()
           if (retry !== -1 && queue[retry]) playSong(queue[retry])
@@ -4073,7 +4054,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
   aiQueueBtn.addEventListener('click', buildAiQueueNow)
   refreshMixesBtn.addEventListener('click', () => {
-    localStorage.removeItem('music-deleted-mixes-v1')
+    try { localStorage.removeItem('music-deleted-mixes-v1') } catch {}
     loadAiMixes(true)
   })
 
@@ -4141,21 +4122,6 @@ window.addEventListener('DOMContentLoaded', () => {
     }
     recordPlayOutcome()
     syncPlayUI()
-    crossfadeArmed = false
-    const planned = getPlannedNext()
-    if (planned && preloadAudio.dataset.trackId === String(planned.song.trackId || '') && preloadAudio.readyState >= 2) {
-      swapPlayers()
-      currentSong = planned.song
-      queueIndex = planned.index
-      invalidateNextPlan()
-      applySongUI(currentSong)
-      renderQueue()
-      activeAudio.play().catch(() => {})
-      planNextTrack()
-      preloadNextTrack()
-      topUpQueue()
-      return
-    }
     nextSong()
   }
 
@@ -4171,7 +4137,7 @@ window.addEventListener('DOMContentLoaded', () => {
     }
     syncProgressUI()
     ensureNextReady()
-    handleCrossfade()
+    if (Date.now() - lastSessionSave > 5000) savePlaybackSession()
   }
 
   function handleMetadata(e) {
@@ -4208,7 +4174,9 @@ window.addEventListener('DOMContentLoaded', () => {
     el.addEventListener('durationchange', handleMetadata)
     el.addEventListener('volumechange', handleVolume)
     el.addEventListener('error', handleError)
-    el.addEventListener('seeked', resetLyricTracking)
+    el.addEventListener('seeked', () => { if (el === activeAudio) { resetLyricTracking(); syncProgressUI() } })
+    el.addEventListener('waiting', () => { if (el === activeAudio) setStatus('Buffering') })
+    el.addEventListener('playing', () => { if (el === activeAudio) setStatus('') })
   }
 
   attachAudioListeners(audioA)
@@ -4247,6 +4215,22 @@ window.addEventListener('DOMContentLoaded', () => {
   })
 
 
+  function savePlaybackSession() {
+    lastSessionSave = Date.now()
+    try {
+      localStorage.setItem('music-session-v1', JSON.stringify({ queue: queue.slice(0, 500), index: queueIndex, song: currentSong, position: Number.isFinite(activeAudio.currentTime) ? activeAudio.currentTime : 0 }))
+    } catch {}
+  }
+
+  const restoredSession = (() => {
+    try { return JSON.parse(localStorage.getItem('music-session-v1') || 'null') } catch { return null }
+  })()
+  window.addEventListener('pagehide', savePlaybackSession)
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) savePlaybackSession()
+    else { syncProgressUI(); syncPlayUI(); resetLyricTracking() }
+  })
+
   applyAudioVolumeState()
 
   applyRailState()
@@ -4275,10 +4259,17 @@ window.addEventListener('DOMContentLoaded', () => {
   loadLyricsForSong(null)
   tickLyrics()
 
+  if (restoredSession?.song && Array.isArray(restoredSession.queue) && restoredSession.queue.length) {
+    queue = restoredSession.queue.filter(song => song && song.trackId && song.trackName)
+    registerSessionTracks(queue)
+    playSong(restoredSession.song, { autoplay: false, position: Number(restoredSession.position) || 0 })
+  }
+
   fetch('/music/ai/status')
     .then(r => r.json())
     .then(d => {
       aiEnabled = Boolean(d?.enabled)
+      translationEnabled = Boolean(d?.translationEnabled)
       invidiousUrl = String(d?.invidiousUrl || '').replace(/\/+$/, '')
       syncEndlessUI()
       if (!aiEnabled) {

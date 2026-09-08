@@ -3,7 +3,9 @@ import { dirname, join } from "node:path";
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import fs from "node:fs";
-import { Readable } from "node:stream";
+import { Budget, WindowLimit, ResultCache, limitValue, limited } from "./lib/limits.js";
+import { proxyAudio, validVideoId } from "./lib/audio-proxy.js";
+import { registerTranslation } from "./lib/translation.js";
 import { Blob } from "node:buffer";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -23,22 +25,23 @@ try {
 }
 
 const binaryName = process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
-const binaryPath = join(__dirname, binaryName);
+const binaryPath = process.env.YT_DLP_PATH || join(__dirname, binaryName);
+const YT_DLP_COOKIES_FROM_BROWSER = String(process.env.YT_DLP_COOKIES_FROM_BROWSER || "").trim().toLowerCase();
+const ALLOWED_COOKIE_BROWSERS = new Set(["firefox", "chrome", "edge", "brave", "chromium"]);
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
-const GEMINI_FALLBACK = "gemini-3.1-flash-lite";
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const GEMINI_TIMEOUT_MS = 20000;
-const GEMINI_MAX_RPM = 12;
-
-const geminiCalls = [];
-
-function geminiRateAvailable() {
-  const cutoff = Date.now() - 60000;
-  while (geminiCalls.length && geminiCalls[0] < cutoff) geminiCalls.shift();
-  return geminiCalls.length < GEMINI_MAX_RPM;
-}
+const dataPath = process.env.DATA_DIR || join(__dirname, 'data');
+const aiBudget = new Budget(join(dataPath, 'ai-usage.json'), {
+  daily: limitValue(process.env.AI_DAILY_LIMIT, 20),
+  monthly: limitValue(process.env.AI_MONTHLY_LIMIT, 200),
+  perClientDaily: limitValue(process.env.AI_CLIENT_DAILY_LIMIT, 5)
+});
+const aiRate = new WindowLimit(2, 60000);
+const aiCache = new ResultCache(100, 21600000);
+let aiActive = 0;
 
 async function callGeminiModel(model, { system, prompt, schema, temperature = 0.9 }) {
   const controller = new AbortController();
@@ -55,6 +58,7 @@ async function callGeminiModel(model, { system, prompt, schema, temperature = 0.
           responseMimeType: "application/json",
           responseSchema: schema,
           temperature,
+          maxOutputTokens: 4096,
         },
       }),
     });
@@ -74,23 +78,16 @@ async function callGeminiModel(model, { system, prompt, schema, temperature = 0.
   }
 }
 
-async function callGemini(options) {
+async function callGemini(options, client) {
   if (!GEMINI_KEY) return null;
-  if (!geminiRateAvailable()) {
-    const error = new Error("gemini-rate-limited");
-    error.status = 429;
-    throw error;
-  }
-  geminiCalls.push(Date.now());
-  try {
-    return await callGeminiModel(GEMINI_MODEL, options);
-  } catch (e) {
-    if (e.status === 404 || e.status === 429 || (e.status >= 500 && e.status < 600)) {
-      console.warn("[Gemini] primary failed, trying fallback:", e.message);
-      return await callGeminiModel(GEMINI_FALLBACK, options);
-    }
-    throw e;
-  }
+  return aiCache.get(JSON.stringify(options), async () => {
+    aiRate.take(client);
+    if (aiActive >= 2) throw limited('AI is busy');
+    aiBudget.reserve(client);
+    aiActive++;
+    try { return await callGeminiModel(GEMINI_MODEL, options); }
+    finally { aiActive--; }
+  });
 }
 
 const TRACK_LIST_SCHEMA = {
@@ -142,16 +139,6 @@ const MIXES_SCHEMA = {
     },
   },
   required: ["mixes"],
-};
-
-const TRANSLATE_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    sourceLanguage: { type: "STRING" },
-    sameLanguage: { type: "BOOLEAN" },
-    lines: { type: "ARRAY", items: { type: "STRING" } },
-  },
-  required: ["sourceLanguage", "sameLanguage", "lines"],
 };
 
 const CURATOR_SYSTEM = [
@@ -261,7 +248,18 @@ function describeTrackList(list, label) {
   return `${label}:\n${items.join("\n")}`;
 }
 
-const fastify = Fastify();
+const fastify = Fastify({ bodyLimit: 32000, trustProxy: process.env.TRUST_PROXY ? process.env.TRUST_PROXY.split(',').map(value => value.trim()) : false });
+const apiRate = new WindowLimit(120, 60000);
+fastify.addHook('onRequest', async (req, reply) => {
+  reply.header('X-Content-Type-Options', 'nosniff');
+  reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  if (req.url.startsWith('/music/')) apiRate.take(req.ip);
+});
+fastify.setErrorHandler((error, req, reply) => {
+  const status = error.statusCode || error.status || 500;
+  if (status === 429) reply.header('Retry-After', String(error.retryAfter || 60));
+  reply.code(status).send({ error: status >= 500 ? 'Service unavailable' : error.message });
+});
 
 const LRCLIB_BASE = "https://lrclib.net/api";
 const LRCLIB_UA = "THPMusic/1.0 (+https://thehtmlproject.com)";
@@ -283,12 +281,15 @@ if (typeof global.File === "undefined") {
   };
 }
 
-const { default: fetch } = await import("node-fetch");
-const { default: ytSearch } = await import("yt-search");
+const { default: nodeFetch } = await import("node-fetch");
+const fetch = (url, options = {}) => nodeFetch(url, { ...options, signal: options.signal || AbortSignal.timeout(12000) });
+const { default: rawYtSearch } = await import("yt-search");
+const searchCache = new ResultCache(300, 1800000);
+const ytSearch = query => searchCache.get(String(query), () => rawYtSearch({ query, timeout: 12000 }));
 const { default: YTDlpWrap } = await import("yt-dlp-wrap");
 
 let ytDlpWrap;
-(async () => {
+const engineReady = (async () => {
   try {
     if (!fs.existsSync(binaryPath)) {
       console.log("[Engine] Downloading binary...");
@@ -748,8 +749,13 @@ const DIRECT_URL_TTL_MS = 30 * 60 * 1000;
 const pendingDirectUrl = new Map();
 
 async function execYtDlpForText(args) {
+  await engineReady;
+  if (!ytDlpWrap) throw new Error("Audio engine unavailable");
+  const cookieArgs = ALLOWED_COOKIE_BROWSERS.has(YT_DLP_COOKIES_FROM_BROWSER)
+    ? ["--cookies-from-browser", YT_DLP_COOKIES_FROM_BROWSER]
+    : [];
   if (ytDlpWrap && typeof ytDlpWrap.execPromise === "function") {
-    return await ytDlpWrap.execPromise(args);
+    return await ytDlpWrap.execPromise(["--ignore-config", "--no-cache-dir", "--source-address", "0.0.0.0", "--socket-timeout", "10", "--retries", "1", "--extractor-retries", "1", "--js-runtimes", "node", ...cookieArgs, ...args], { timeout: 35000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
   }
   return await new Promise((resolve, reject) => {
     try {
@@ -770,6 +776,7 @@ async function execYtDlpForText(args) {
 }
 
 async function resolveDirectAudioUrl(id) {
+  if (!validVideoId(id)) throw new Error("Invalid video id");
   const now = Date.now();
   const cached = directUrlCache.get(id);
   if (cached && cached.expiresAt > now) return cached.url;
@@ -777,6 +784,8 @@ async function resolveDirectAudioUrl(id) {
   const inFlight = pendingDirectUrl.get(id);
   if (inFlight) return await inFlight;
 
+  if (pendingDirectUrl.size >= 8) throw limited("Audio engine busy");
+  if (directUrlCache.size >= 500) directUrlCache.delete(directUrlCache.keys().next().value);
   const task = resolveDirectAudioUrlUncached(id);
   pendingDirectUrl.set(id, task);
   try {
@@ -789,7 +798,7 @@ async function resolveDirectAudioUrl(id) {
 const INVIDIOUS_URL = String(process.env.INVIDIOUS_URL || "").trim().replace(/\/+$/, "");
 
 const INVIDIOUS_ITAGS = [140, 251];
-const INVIDIOUS_PROBE_TIMEOUT_MS = 8000;
+const INVIDIOUS_PROBE_TIMEOUT_MS = 2500;
 const INVIDIOUS_BREAKER_THRESHOLD = 3;
 const INVIDIOUS_BREAKER_COOLDOWN_MS = 5 * 60 * 1000;
 
@@ -835,10 +844,11 @@ async function resolveViaInvidious(id) {
         });
         const type = resp.headers.get("content-type") || "";
         if ((resp.status === 206 || resp.status === 200) && type.startsWith("audio")) {
-          if (resp.body && typeof resp.body.cancel === "function") resp.body.cancel().catch(() => {});
+          resp.body?.destroy();
           noteInvidiousResult(true);
           return url;
         }
+        resp.body?.destroy();
       } catch {
         continue;
       } finally {
@@ -851,12 +861,7 @@ async function resolveViaInvidious(id) {
   return null;
 }
 
-const EXTRACT_STRATEGIES = [
-  [],
-  ["--extractor-args", "youtube:player_client=default,android_vr"],
-  ["--extractor-args", "youtube:player_client=web_safari,tv"],
-  ["--extractor-args", "youtube:player_client=ios"],
-];
+const EXTRACT_STRATEGIES = [[], ["--extractor-args", "youtube:player_client=default,android_vr"]];
 
 async function resolveViaYtDlp(id) {
   const baseArgs = [
@@ -893,32 +898,13 @@ async function resolveViaYtDlp(id) {
 }
 
 async function resolveDirectAudioUrlUncached(id) {
-  if (invidiousAvailable()) {
-    const fastUrl = await resolveViaInvidious(id);
-    if (fastUrl) {
-      console.log(`[Extract] ${id} via Invidious`);
-      directUrlCache.set(id, { url: fastUrl, expiresAt: Date.now() + DIRECT_URL_TTL_MS });
-      return fastUrl;
-    }
-    console.warn(`[Extract] ${id} Invidious unavailable, using yt-dlp`);
+  try { return await resolveViaYtDlp(id); }
+  catch (error) {
+    const url = await resolveViaInvidious(id);
+    if (!url) throw error;
+    directUrlCache.set(id, { url, expiresAt: Date.now() + DIRECT_URL_TTL_MS });
+    return url;
   }
-
-  let lastError = null;
-  try {
-    return await resolveViaYtDlp(id);
-  } catch (e) {
-    lastError = e;
-  }
-
-  const invidiousUrl = await resolveViaInvidious(id);
-  if (invidiousUrl) {
-    console.log(`[Extract] ${id} recovered via Invidious`);
-    directUrlCache.set(id, { url: invidiousUrl, expiresAt: Date.now() + DIRECT_URL_TTL_MS });
-    return invidiousUrl;
-  }
-
-  console.error(`[Extract] all strategies failed for ${id}:`, lastError?.message || lastError);
-  throw lastError || new Error("no-direct-url");
 }
 
 const lyricsCache = new Map();
@@ -1279,45 +1265,14 @@ function writeLyricsCache(key, value, ttl) {
   lyricsCache.set(key, { value, expiresAt: Date.now() + ttl });
 }
 
-fastify.get("/music/stream", async (req, reply) => {
-  const { id } = req.query;
-
-  if (!id || !ytDlpWrap) {
-    return reply.status(400).send({ error: "Unavailable" });
-  }
-
-  try {
-    reply.header("Content-Type", "audio/mp4");
-    reply.header("Cache-Control", "no-store");
-    reply.header("Accept-Ranges", "none");
-
-    const stream = ytDlpWrap.execStream([
-      `https://www.youtube.com/watch?v=${id}`,
-      "-f",
-      "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio",
-      "--no-playlist",
-      "--no-warnings",
-      "-o",
-      "-"
-    ]);
-
-    stream.on("error", (e) => {
-      console.error(e);
-      if (!reply.sent) {
-        reply.status(500).send({ error: "Stream failed" });
-      }
-    });
-
-    return reply.send(stream);
-  } catch (e) {
-    console.error(e);
-    return reply.status(500).send({ error: "Stream failed" });
-  }
+fastify.get('/music/stream', async (req, reply) => {
+  if (!validVideoId(req.query.id)) return reply.code(400).send({ error: 'Invalid video id' });
+  return reply.redirect('/music/direct-audio?id=' + encodeURIComponent(req.query.id));
 });
 
 fastify.get("/music/prewarm", async (req, reply) => {
   const { id } = req.query || {};
-  if (!id) return reply.status(400).send({ error: "Missing id" });
+  if (!validVideoId(id)) return reply.status(400).send({ error: "Invalid video id" });
   try {
     await resolveDirectAudioUrl(id);
     return reply.send({ ok: true, id });
@@ -1327,95 +1282,35 @@ fastify.get("/music/prewarm", async (req, reply) => {
   }
 });
 
-async function fetchUpstreamAudio(url, clientRange) {
-  const headers = {
-    Range: clientRange || "bytes=0-",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-    Accept: "*/*",
-    "Accept-Encoding": "identity",
-  };
-  return await fetch(url, { headers });
+async function fetchUpstreamAudio(url, range, signal) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(abort, 15000);
+  try {
+    const response = await fetch(url, {
+      headers: { ...(range ? { Range: range } : {}), 'Accept-Encoding': 'identity', 'User-Agent': 'Mozilla/5.0', Accept: '*/*' },
+      signal: AbortSignal.any([signal, controller.signal])
+    });
+    return response;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', abort);
+  }
 }
 
-fastify.get("/music/direct-audio", async (req, reply) => {
-  const { id } = req.query;
-  if (!id) return reply.status(400).send({ error: "Missing id" });
-
-  const clientRange = req.headers.range || null;
-
-  try {
-    let url = await resolveDirectAudioUrl(id);
-    let resp = await fetchUpstreamAudio(url, clientRange);
-    const retryableStatuses = new Set([400, 403, 410, 429, 500, 502, 503, 504]);
-
-    if (retryableStatuses.has(resp.status)) {
-      console.warn(`[DirectAudio] ${id} upstream ${resp.status}, re-resolving`);
-      directUrlCache.delete(id);
-      if (INVIDIOUS_URL && url.startsWith(INVIDIOUS_URL)) {
-        try {
-          url = await resolveViaYtDlp(id);
-        } catch {
-          url = await resolveDirectAudioUrl(id);
-        }
-      } else {
-        url = await resolveDirectAudioUrl(id);
-      }
-      resp = await fetchUpstreamAudio(url, clientRange);
-
-      if (retryableStatuses.has(resp.status) && INVIDIOUS_URL && !url.startsWith(INVIDIOUS_URL)) {
-        const fallbackUrl = await resolveViaInvidious(id);
-        if (fallbackUrl) {
-          console.warn(`[DirectAudio] ${id} falling back to Invidious`);
-          directUrlCache.set(id, { url: fallbackUrl, expiresAt: Date.now() + DIRECT_URL_TTL_MS });
-          resp = await fetchUpstreamAudio(fallbackUrl, clientRange);
-        }
-      }
-    }
-
-    if (!resp.ok && resp.status !== 206) {
-      console.error(`[DirectAudio] ${id} upstream ${resp.status}`);
-      return reply.status(502).send({ error: "Upstream rejected" });
-    }
-
-    const contentRange = resp.headers.get("content-range");
-    const contentType = resp.headers.get("content-type") || "audio/mp4";
-
-    if (!clientRange && resp.status === 206) {
-      const total = contentRange && contentRange.includes("/") ? contentRange.split("/").pop().trim() : null;
-      reply.status(200);
-      reply.header("Content-Type", contentType);
-      reply.header("Accept-Ranges", "bytes");
-      if (total && /^\d+$/.test(total)) reply.header("Content-Length", total);
-    } else {
-      reply.status(resp.status);
-      resp.headers.forEach((val, key) => {
-        const lower = key.toLowerCase();
-        if (["connection", "transfer-encoding", "content-encoding", "content-length"].includes(lower)) return;
-        reply.header(key, val);
-      });
-      const rangeMatch = contentRange && contentRange.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
-      if (rangeMatch) reply.header("Content-Length", String(Number(rangeMatch[2]) - Number(rangeMatch[1]) + 1));
-      reply.header("Accept-Ranges", "bytes");
-    }
-
-    reply.header("Cache-Control", "no-store");
-
-    let body = resp.body || null;
-    if (body && typeof body.getReader === "function") {
-      body = Readable.fromWeb(body);
-    }
-    return reply.send(body);
-  } catch (e) {
-    console.error("[DirectAudio]", e.message || e);
-    return reply.status(502).send({ error: "Direct audio failed" });
-  }
-});
+fastify.get('/music/direct-audio', async (req, reply) => proxyAudio(req, reply, {
+  resolve: resolveDirectAudioUrl, fetchAudio: fetchUpstreamAudio, invalidate: id => directUrlCache.delete(id)
+}));
 
 fastify.get("/music/cover", async (req, reply) => {
   const { url } = req.query;
   if (!url) return reply.status(400).send("Missing url");
   try {
-    const resp = await fetch(url);
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port || !/^(?:[a-z0-9-]+\.)*(?:mzstatic\.com|ytimg\.com|ggpht\.com)$/.test(parsed.hostname)) return reply.code(400).send('Invalid image host');
+    const resp = await fetch(parsed, { redirect: 'error', size: 5 * 1024 * 1024 });
+    if (!resp.ok || !/^image\/(jpeg|png|webp|avif|gif)(?:;|$)/i.test(resp.headers.get('content-type') || '')) return reply.code(502).send('Invalid image');
     const buffer = await resp.arrayBuffer();
     reply.header("Content-Type", resp.headers.get("content-type"));
     reply.header("Cache-Control", "public, max-age=604800, stale-while-revalidate=86400");
@@ -1542,6 +1437,7 @@ fastify.get("/music/catalog/genre", async (req, reply) => {
 fastify.get("/music/ai/status", async (req, reply) => {
   return reply.send({
     enabled: Boolean(GEMINI_KEY),
+    translationEnabled: Boolean(process.env.GOOGLE_TRANSLATE_API_KEY),
     model: GEMINI_KEY ? GEMINI_MODEL : null,
     invidiousUrl: INVIDIOUS_URL || null,
   });
@@ -1573,7 +1469,7 @@ fastify.post("/music/ai/queue", async (req, reply) => {
       prompt: parts.join("\n\n"),
       schema: TRACK_LIST_SCHEMA,
       temperature: 1,
-    });
+    }, req.ip);
     if (!result?.tracks?.length) return reply.status(502).send({ error: "No suggestions" });
 
     const excludeKeys = [
@@ -1582,7 +1478,7 @@ fastify.post("/music/ai/queue", async (req, reply) => {
       ...(seed ? [seed] : []),
     ].map((t) => normalizeMatchText(`${t.artist || t.artistName || ""} ${t.title || t.trackName || ""}`));
 
-    const tracks = await resolveSuggestions(result.tracks, excludeKeys);
+    const tracks = await resolveSuggestions(result.tracks.slice(0, count), excludeKeys);
     if (!tracks.length) return reply.status(502).send({ error: "Nothing resolved" });
 
     return reply.send({
@@ -1593,7 +1489,8 @@ fastify.post("/music/ai/queue", async (req, reply) => {
       results: tracks,
     });
   } catch (e) {
-    const status = e.status === 429 ? 429 : 502;
+    const status = e.status === 429 ? 429 : e.status === 503 ? 503 : 502;
+    if (status === 429) reply.header("Retry-After", String(e.retryAfter || 60));
     console.error("[AI Queue]", e.message || e, e.detail || "");
     return reply.status(status).send({ error: e.message || "AI failed" });
   }
@@ -1637,7 +1534,7 @@ fastify.post("/music/ai/mixes", async (req, reply) => {
       prompt,
       schema: MIXES_SCHEMA,
       temperature: 1,
-    });
+    }, req.ip);
     if (!result?.mixes?.length) return reply.status(502).send({ error: "No mixes" });
 
     const seen = new Set();
@@ -1661,71 +1558,20 @@ fastify.post("/music/ai/mixes", async (req, reply) => {
     if (!mixes.length) return reply.status(502).send({ error: "Nothing resolved" });
     return reply.send({ mixes });
   } catch (e) {
-    const status = e.status === 429 ? 429 : 502;
+    const status = e.status === 429 ? 429 : e.status === 503 ? 503 : 502;
+    if (status === 429) reply.header("Retry-After", String(e.retryAfter || 60));
     console.error("[AI Mixes]", e.message || e, e.detail || "");
     return reply.status(status).send({ error: e.message || "AI failed" });
   }
 });
 
-const translationCache = new Map();
-const TRANSLATION_TTL_MS = 24 * 60 * 60 * 1000;
-
-fastify.post("/music/ai/translate", async (req, reply) => {
-  if (!GEMINI_KEY) return reply.status(503).send({ error: "AI disabled" });
-  const body = req.body || {};
-  const lines = Array.isArray(body.lines) ? body.lines.slice(0, 200).map((l) => String(l || "")) : [];
-  const target = String(body.target || "en").slice(0, 12);
-  if (!lines.length) return reply.status(400).send({ error: "No lines" });
-
-  const cacheKey = `${target}|${body.trackKey || ""}|${lines.length}|${lines[0]}|${lines[lines.length - 1]}`;
-  const cached = translationCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) return reply.send(cached.value);
-
-  const numbered = lines.map((line, i) => `${i + 1}. ${line || "(instrumental)"}`).join("\n");
-  const prompt = [
-    `Target language code: ${target}`,
-    `Translate these song lyric lines into the target language.`,
-    `Return exactly ${lines.length} lines in the same order, one translation per input line.`,
-    `If an input line is empty or marked instrumental, return an empty string for it.`,
-    `Set sameLanguage to true only if the lyrics are already written in the target language, and in that case still return the original lines.`,
-    `Translate meaning and tone naturally rather than word for word, and keep each line short enough to read while the song plays.`,
-    "",
-    numbered,
-  ].join("\n");
-
-  try {
-    const result = await callGemini({
-      system:
-        "You translate song lyrics accurately and naturally. You always return exactly one output line per input line, preserving order.",
-      prompt,
-      schema: TRANSLATE_SCHEMA,
-      temperature: 0.3,
-    });
-
-    if (!result || !Array.isArray(result.lines)) return reply.status(502).send({ error: "Translation failed" });
-    if (result.lines.length !== lines.length) {
-      return reply.status(502).send({ error: "Line count mismatch" });
-    }
-
-    const value = {
-      sourceLanguage: result.sourceLanguage || "unknown",
-      sameLanguage: Boolean(result.sameLanguage),
-      target,
-      lines: result.lines,
-    };
-
-    if (translationCache.size > 200) {
-      const oldest = translationCache.keys().next().value;
-      if (oldest !== undefined) translationCache.delete(oldest);
-    }
-    translationCache.set(cacheKey, { value, expiresAt: Date.now() + TRANSLATION_TTL_MS });
-
-    return reply.send(value);
-  } catch (e) {
-    const status = e.status === 429 ? 429 : 502;
-    console.error("[AI Translate]", e.message || e, e.detail || "");
-    return reply.status(status).send({ error: e.message || "Translation failed" });
-  }
+registerTranslation(fastify, {
+  key: process.env.GOOGLE_TRANSLATE_API_KEY || '', fetch,
+  budget: new Budget(join(dataPath, 'translation-usage.json'), {
+    daily: limitValue(process.env.TRANSLATION_DAILY_CHAR_LIMIT, 15000, 500000),
+    monthly: limitValue(process.env.TRANSLATION_MONTHLY_CHAR_LIMIT, 450000, 450000),
+    perClientDaily: limitValue(process.env.TRANSLATION_CLIENT_DAILY_CHAR_LIMIT, 10000, 500000)
+  })
 });
 
 fastify.register(fastifyStatic, {
@@ -1734,6 +1580,7 @@ fastify.register(fastifyStatic, {
 });
 
 fastify.setNotFoundHandler((req, reply) => {
+  if (req.url.startsWith("/music/")) return reply.code(404).send({ error: "Unknown API endpoint" });
   reply.sendFile("index.html");
 });
 

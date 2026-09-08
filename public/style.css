@@ -67,7 +67,36 @@
   --rail-w: 88px;
   --now-h: 104px;
 
-  --font: 'Google Sans', 'Google Sans Text', 'Product Sans', 'Roboto', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font: 'Mozilla Text', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+@font-face {
+  font-family: 'Mozilla Text';
+  src: url('/fonts/MozillaText.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+.search-result-group {
+  min-width: 0;
+}
+
+.search-result-group + .search-result-group {
+  margin-top: 28px;
+}
+
+.search-result-heading {
+  margin: 0 0 10px;
+  color: var(--on-surface);
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.search-result-note {
+  margin: -4px 0 12px;
+  color: var(--on-surface-variant);
+  font-size: 13px;
 }
 
 html[data-theme="dark"],
