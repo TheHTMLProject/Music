@@ -6,6 +6,7 @@ import fs from "node:fs";
 import { Budget, WindowLimit, ResultCache, limitValue, limited } from "./lib/limits.js";
 import { proxyAudio, validVideoId } from "./lib/audio-proxy.js";
 import { registerTranslation } from "./lib/translation.js";
+import { withYtDlpCookies } from "./lib/yt-dlp-cookies.js";
 import { Blob } from "node:buffer";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -27,6 +28,7 @@ try {
 const binaryName = process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
 const binaryPath = process.env.YT_DLP_PATH || join(__dirname, binaryName);
 const YT_DLP_COOKIES_FROM_BROWSER = String(process.env.YT_DLP_COOKIES_FROM_BROWSER || "").trim().toLowerCase();
+const YT_DLP_COOKIES_FILE = String(process.env.YT_DLP_COOKIES_FILE || "").trim();
 const ALLOWED_COOKIE_BROWSERS = new Set(["firefox", "chrome", "edge", "brave", "chromium"]);
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
@@ -751,27 +753,31 @@ const pendingDirectUrl = new Map();
 async function execYtDlpForText(args) {
   await engineReady;
   if (!ytDlpWrap) throw new Error("Audio engine unavailable");
-  const cookieArgs = ALLOWED_COOKIE_BROWSERS.has(YT_DLP_COOKIES_FROM_BROWSER)
-    ? ["--cookies-from-browser", YT_DLP_COOKIES_FROM_BROWSER]
-    : [];
-  if (ytDlpWrap && typeof ytDlpWrap.execPromise === "function") {
-    return await ytDlpWrap.execPromise(["--ignore-config", "--no-cache-dir", "--source-address", "0.0.0.0", "--socket-timeout", "10", "--retries", "1", "--extractor-retries", "1", "--js-runtimes", "node", ...cookieArgs, ...args], { timeout: 35000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
-  }
-  return await new Promise((resolve, reject) => {
-    try {
-      const child = ytDlpWrap.exec(args);
-      let out = "";
-      let err = "";
-      if (child.stdout) child.stdout.on("data", (d) => (out += d.toString()));
-      if (child.stderr) child.stderr.on("data", (d) => (err += d.toString()));
-      child.on("error", reject);
-      child.on("close", (code) => {
-        if (code === 0) resolve(out);
-        else reject(new Error(err || `yt-dlp exited with code ${code}`));
-      });
-    } catch (e) {
-      reject(e);
+  return await withYtDlpCookies({
+    cookieFile: YT_DLP_COOKIES_FILE,
+    browser: YT_DLP_COOKIES_FROM_BROWSER,
+    allowedBrowsers: ALLOWED_COOKIE_BROWSERS,
+  }, async (cookieArgs) => {
+    const commandArgs = ["--ignore-config", "--no-cache-dir", "--source-address", "0.0.0.0", "--socket-timeout", "10", "--retries", "1", "--extractor-retries", "1", "--js-runtimes", "node", ...cookieArgs, ...args];
+    if (typeof ytDlpWrap.execPromise === "function") {
+      return await ytDlpWrap.execPromise(commandArgs, { timeout: 35000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
     }
+    return await new Promise((resolve, reject) => {
+      try {
+        const child = ytDlpWrap.exec(commandArgs);
+        let out = "";
+        let err = "";
+        if (child.stdout) child.stdout.on("data", (d) => (out += d.toString()));
+        if (child.stderr) child.stderr.on("data", (d) => (err += d.toString()));
+        child.on("error", reject);
+        child.on("close", (code) => {
+          if (code === 0) resolve(out);
+          else reject(new Error(err || `yt-dlp exited with code ${code}`));
+        });
+      } catch (e) {
+        reject(e);
+      }
+    });
   });
 }
 

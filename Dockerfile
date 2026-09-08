@@ -16,7 +16,8 @@ COPY lib ./lib
 COPY public ./public
 COPY yt-dlp ./yt-dlp
 
-RUN chmod 755 /app/yt-dlp \
+RUN mkdir -p /app/data \
+    && chmod 755 /app/yt-dlp \
     && chown -R node:node /app
 
 USER node

@@ -6,3 +6,5 @@ node_modules
 .env.*
 !.env.example
 yt-dlp.exe
+youtube-cookies.txt
+yt-dlp-with-cookies
