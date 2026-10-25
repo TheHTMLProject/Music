@@ -16,6 +16,7 @@
 		B10000000000000000000007 /* OFL.txt in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000007 /* OFL.txt */; };
 		B10000000000000000000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000008 /* Assets.xcassets */; };
 		B10000000000000000000009 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000B /* PrivacyInfo.xcprivacy */; };
+		B1000000000000000000000A = {isa = PBXBuildFile; fileRef = A1000000000000000000000C; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,6 +31,7 @@
 		A10000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A1000000000000000000000A /* Music.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Music.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1000000000000000000000B /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		A1000000000000000000000C = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -60,6 +62,7 @@
 				A10000000000000000000004 /* Stores.swift */,
 				A10000000000000000000005 /* Views.swift */,
 				A10000000000000000000008 /* Assets.xcassets */,
+				A1000000000000000000000C,
 				A10000000000000000000009 /* Info.plist */,
 				A1000000000000000000000B /* PrivacyInfo.xcprivacy */,
 				C10000000000000000000003 /* Resources */,
@@ -145,6 +148,7 @@
 				B10000000000000000000006 /* MozillaText.ttf in Resources */,
 				B10000000000000000000007 /* OFL.txt in Resources */,
 				B10000000000000000000008 /* Assets.xcassets in Resources */,
+				B1000000000000000000000A,
 				B10000000000000000000009 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -200,9 +204,11 @@
 		F10000000000000000000003 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = XBS55SJHJ8;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Music/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -218,9 +224,11 @@
 		F10000000000000000000004 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = XBS55SJHJ8;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Music/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;

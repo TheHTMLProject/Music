@@ -123,7 +123,7 @@ For a read-only cookie mount, set `YT_DLP_COOKIES_FILE=/run/secrets/youtube-cook
 
 ## iOS app
 
-The native SwiftUI counterpart is in [`ios`](ios). Open `ios/Music.xcodeproj` in Xcode 16 or newer and follow [`ios/README.md`](ios/README.md) to connect it to the self-hosted server.
+The native SwiftUI counterpart is in [`ios`](ios). Open `ios/Music.xcodeproj` in Xcode 26 or newer and follow [`ios/README.md`](ios/README.md) to connect it to the self-hosted server.
 
 ## License
 
